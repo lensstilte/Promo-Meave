@@ -1,14 +1,11 @@
 import os
 import random
 import logging
-from typing import List, Optional
 
-from atproto import Client, models
+from atproto import Client
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+# ===== instellingen =====
+TARGET_HANDLE = "grovel4maeve.bsky.social"
 
 ACCOUNT_KEYS = [
     "BEAUTYFAN",
@@ -18,10 +15,13 @@ ACCOUNT_KEYS = [
     "NSFWBLEUSKY",
 ]
 
-TARGET_HANDLE = "grovel4maeve.bsky.social"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 
 
-def get_client_for_account(label: str) -> Optional[Client]:
+def get_client_for_account(label: str):
     username = os.getenv(f"BSKY_USERNAME_{label}")
     password = os.getenv(f"BSKY_PASSWORD_{label}")
 
@@ -43,40 +43,32 @@ def get_client_for_account(label: str) -> Optional[Client]:
     return client
 
 
-def has_media(post_view: models.AppBskyFeedDefs_PostView) -> bool:
+def is_original_post(post_view) -> bool:
+    """Alleen echte eigen posts, geen repost-records."""
+    record = getattr(post_view, "record", None)
+    rtype = (
+        getattr(record, "py_type", None)
+        or getattr(record, "_type", None)
+        or getattr(record, "$type", None)
+        or ""
+    )
+    return "app.bsky.feed.post" in str(rtype)
+
+
+def has_media(post_view) -> bool:
+    """Alleen posts met foto of video."""
     embed = getattr(post_view, "embed", None)
     if not embed:
         return False
 
-    if isinstance(embed, models.AppBskyEmbedImages_View):
-        return bool(embed.images)
+    etype = (
+        getattr(embed, "py_type", None)
+        or getattr(embed, "_type", None)
+        or ""
+    )
 
-    if isinstance(embed, models.AppBskyEmbedVideo_View):
-        return True
-
-    if isinstance(embed, models.AppBskyEmbedRecordWithMedia_View):
-        media = embed.media
-        if isinstance(media, models.AppBskyEmbedImages_View):
-            return bool(media.images)
-        if isinstance(media, models.AppBskyEmbedVideo_View):
-            return True
-
-    return False
-
-
-def filter_original_media_posts(feed_posts: List[models.AppBskyFeedDefs_FeedViewPost]):
-    filtered = []
-    for fp in feed_posts:
-        if fp.reason is not None:
-            continue
-
-        post_view = fp.post
-        if not has_media(post_view):
-            continue
-
-        filtered.append(fp)
-
-    return filtered
+    # direct images of video
+    return ("embed.images" in etype) or ("embed.video" in etype)
 
 
 def fetch_recent_posts(client: Client, actor_handle: str, limit: int = 50):
@@ -86,18 +78,30 @@ def fetch_recent_posts(client: Client, actor_handle: str, limit: int = 50):
         limit=limit,
         filter="posts_no_replies",
     )
-    raw_posts = list(feed.feed or [])
-    filtered_posts = filter_original_media_posts(raw_posts)
 
-    logging.info(
-        "Totaal %d posts in feed, %d over na filter (eigen + media).",
-        len(raw_posts),
-        len(filtered_posts),
-    )
-    return filtered_posts
+    cleaned = []
+    for feed_post in list(feed.feed or []):
+        post_view = feed_post.post
+
+        if not is_original_post(post_view):
+            # sla reposts van andere accounts over
+            continue
+
+        if not has_media(post_view):
+            # geen tekst-only posts
+            continue
+
+        cleaned.append(feed_post)
+
+    return cleaned
 
 
 def choose_posts_for_run(feed_posts, num_random_older: int = 2):
+    """
+    Kies:
+    - altijd de nieuwste post (index 0)
+    - plus num_random_older willekeurige oudere posts uit de rest
+    """
     if not feed_posts:
         return []
 
@@ -114,12 +118,38 @@ def choose_posts_for_run(feed_posts, num_random_older: int = 2):
     return selected
 
 
-def unrepost_if_needed_and_repost(client: Client, feed_post) -> None:
+def sort_posts_old_to_new(feed_posts):
+    """Zodat de nieuwste als laatste gerepost wordt (en dus bovenaan komt)."""
+
+    def key(fp):
+        pv = fp.post
+        return getattr(pv, "indexed_at", "") or ""
+
+    return sorted(feed_posts, key=key)
+
+
+def ensure_like(client: Client, post_view) -> None:
+    """Zorg dat de bot-account de post geliked heeft."""
+    viewer = getattr(post_view, "viewer", None)
+    like_uri = getattr(viewer, "like", None) if viewer else None
+
+    if like_uri:
+        logging.info("  Post %s is al geliked (record %s).", post_view.uri, like_uri)
+        return
+
+    try:
+        client.like(uri=post_view.uri, cid=post_view.cid)
+        logging.info("  Like toegevoegd.")
+    except Exception as e:
+        logging.error("  Like mislukt voor %s: %s", post_view.uri, e)
+
+
+def unrepost_if_needed_and_repost_and_like(client: Client, feed_post) -> None:
     post_view = feed_post.post
 
     uri = post_view.uri
     cid = post_view.cid
-    viewer = post_view.viewer
+    viewer = getattr(post_view, "viewer", None)
     repost_uri = getattr(viewer, "repost", None) if viewer else None
 
     if repost_uri:
@@ -144,10 +174,14 @@ def unrepost_if_needed_and_repost(client: Client, feed_post) -> None:
         logging.info("  Repost gelukt.")
     except Exception as e:
         logging.error("  Repost mislukt voor %s: %s", uri, e)
+        return
+
+    # meteen liken
+    ensure_like(client, post_view)
 
 
 def process_account(label: str, target_handle: str) -> None:
-    logging.info("=== Account %s starten ===", label)
+    logging.info("=== Account %s starten (target=%s) ===", label, target_handle)
     client = get_client_for_account(label)
     if not client:
         logging.warning("Account %s wordt overgeslagen.", label)
@@ -173,6 +207,7 @@ def process_account(label: str, target_handle: str) -> None:
         return
 
     to_repost = choose_posts_for_run(feed_posts, num_random_older=2)
+    to_repost = sort_posts_old_to_new(to_repost)
 
     logging.info(
         "Account %s gaat %d posts (nieuwste + random oudere) (opnieuw) repost-en.",
@@ -180,8 +215,8 @@ def process_account(label: str, target_handle: str) -> None:
         len(to_repost),
     )
 
-    for feed_post in to_repost[::-1]:
-        unrepost_if_needed_and_repost(client, feed_post)
+    for feed_post in to_repost:
+        unrepost_if_needed_and_repost_and_like(client, feed_post)
 
 
 def main():
@@ -190,7 +225,7 @@ def main():
     for label in ACCOUNT_KEYS:
         process_account(label, TARGET_HANDLE)
 
-    logging.info("Multi-reposter run voltooid voor %s.", TARGET_HANDLE)
+    logging.info("Multi-reposter run voltooid.")
 
 
 if __name__ == "__main__":
