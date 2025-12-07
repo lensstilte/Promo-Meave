@@ -1,1 +1,46 @@
+name: Multi Reposter (grovel4maeve)
 
+on:
+  schedule:
+    # Elk uur; pas dit gerust aan als je vaker/minder vaak wil draaien
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  run-multi-reposter:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install atproto
+
+      - name: Run multi repost script
+        env:
+          BSKY_USERNAME_BEAUTYFAN: ${{ secrets.BSKY_USERNAME_BEAUTYFAN }}
+          BSKY_PASSWORD_BEAUTYFAN: ${{ secrets.BSKY_PASSWORD_BEAUTYFAN }}
+
+          BSKY_USERNAME_BEAUTYGROUP: ${{ secrets.BSKY_USERNAME_BEAUTYGROUP }}
+          BSKY_PASSWORD_BEAUTYGROUP: ${{ secrets.BSKY_PASSWORD_BEAUTYGROUP }}
+
+          BSKY_USERNAME_HOTBLEUSKY: ${{ secrets.BSKY_USERNAME_HOTBLEUSKY }}
+          BSKY_PASSWORD_HOTBLEUSKY: ${{ secrets.BSKY_PASSWORD_HOTBLEUSKY }}
+
+          BSKY_USERNAME_BLEUSKYPROMO: ${{ secrets.BSKY_USERNAME_BLEUSKYPROMO }}
+          BSKY_PASSWORD_BLEUSKYPROMO: ${{ secrets.BSKY_PASSWORD_BLEUSKYPROMO }}
+
+          BSKY_USERNAME_NSFWBLEUSKY: ${{ secrets.BSKY_USERNAME_NSFWBLEUSKY }}
+          BSKY_PASSWORD_NSFWBLEUSKY: ${{ secrets.BSKY_PASSWORD_NSFWBLEUSKY }}
+
+          TARGET_HANDLE: ${{ secrets.TARGET_HANDLE }}
+        run: |
+          python multi_reposter_grovel4maeve.py
