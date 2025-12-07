@@ -1,17 +1,15 @@
 import os
 import random
 import logging
-from typing import Optional, List
+from typing import List, Optional
 
-from atproto import Client
+from atproto import Client, models
 
-# Basis logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-# Accounts / secrets keys (suffix na BSKY_USERNAME_ / BSKY_PASSWORD_)
 ACCOUNT_KEYS = [
     "BEAUTYFAN",
     "BEAUTYGROUP",
@@ -20,20 +18,10 @@ ACCOUNT_KEYS = [
     "NSFWBLEUSKY",
 ]
 
-
-def get_target_handle() -> str:
-    handle = os.getenv("TARGET_HANDLE")
-    if not handle:
-        logging.error("TARGET_HANDLE environment variable is niet gezet.")
-        raise SystemExit(1)
-    return handle
+TARGET_HANDLE = "grovel4maeve.bsky.social"
 
 
 def get_client_for_account(label: str) -> Optional[Client]:
-    """
-    Haal username/password uit env en log in.
-    Als er geen secrets zijn ingevuld voor dit account: skip.
-    """
     username = os.getenv(f"BSKY_USERNAME_{label}")
     password = os.getenv(f"BSKY_PASSWORD_{label}")
 
@@ -55,111 +43,68 @@ def get_client_for_account(label: str) -> Optional[Client]:
     return client
 
 
+def has_media(post_view: models.AppBskyFeedDefs_PostView) -> bool:
+    embed = getattr(post_view, "embed", None)
+    if not embed:
+        return False
+
+    if isinstance(embed, models.AppBskyEmbedImages_View):
+        return bool(embed.images)
+
+    if isinstance(embed, models.AppBskyEmbedVideo_View):
+        return True
+
+    if isinstance(embed, models.AppBskyEmbedRecordWithMedia_View):
+        media = embed.media
+        if isinstance(media, models.AppBskyEmbedImages_View):
+            return bool(media.images)
+        if isinstance(media, models.AppBskyEmbedVideo_View):
+            return True
+
+    return False
+
+
+def filter_original_media_posts(feed_posts: List[models.AppBskyFeedDefs_FeedViewPost]):
+    filtered = []
+    for fp in feed_posts:
+        if fp.reason is not None:
+            continue
+
+        post_view = fp.post
+        if not has_media(post_view):
+            continue
+
+        filtered.append(fp)
+
+    return filtered
+
+
 def fetch_recent_posts(client: Client, actor_handle: str, limit: int = 50):
-    """
-    Haal recente posts van de target op.
-    We gebruiken 'posts_no_replies' zodat je alleen eigen posts/reposts pakt, geen replies.
-    """
     logging.info("Posts ophalen van %s (limit=%d)...", actor_handle, limit)
     feed = client.get_author_feed(
         actor=actor_handle,
         limit=limit,
         filter="posts_no_replies",
     )
-    return list(feed.feed or [])
-
-
-def has_media(post_view) -> bool:
-    """
-    Alleen posts met media (foto / video) toestaan.
-    We checken of er een embed met afbeeldingen of video is.
-    """
-    embed = getattr(post_view, "embed", None)
-    if not embed:
-        return False
-
-    def is_media(e) -> bool:
-        if not e:
-            return False
-
-        # Type check (images / video)
-        t = getattr(e, "$type", "") or getattr(e, "_type", "")
-        t = (t or "").lower()
-
-        if "images" in t or "video" in t:
-            return True
-
-        # Als er een images-lijst op zit, is het sowieso media
-        if getattr(e, "images", None):
-            return True
-
-        # Soms zit media genest in .media
-        inner = getattr(e, "media", None)
-        if inner and is_media(inner):
-            return True
-
-        return False
-
-    return is_media(embed)
-
-
-def filter_valid_posts(feed_posts, actor_handle: str):
-    """
-    Filter:
-    - alleen eigen originele posts (geen reposts, geen posts van andere auteur)
-    - alleen posts met media (foto / video)
-    """
-    valid = []
-    for item in feed_posts:
-        post_view = getattr(item, "post", None)
-        if not post_view:
-            continue
-
-        author = getattr(post_view, "author", None)
-        handle = getattr(author, "handle", None)
-
-        # Veiligheid: alleen posts van de target-handle zelf
-        if handle and handle != actor_handle:
-            continue
-
-        # Geen reposts van andere accounts: op author feed
-        # krijgen reposts van de actor meestal een 'reason' mee.
-        reason = getattr(item, "reason", None)
-        if reason is not None:
-            # Dit is een repost-record, skippen
-            continue
-
-        # Alleen met media (foto / video)
-        if not has_media(post_view):
-            continue
-
-        valid.append(item)
+    raw_posts = list(feed.feed or [])
+    filtered_posts = filter_original_media_posts(raw_posts)
 
     logging.info(
-        "Na filteren: %d geldige posts (eigen + media) gevonden.",
-        len(valid),
+        "Totaal %d posts in feed, %d over na filter (eigen + media).",
+        len(raw_posts),
+        len(filtered_posts),
     )
-    return valid
+    return filtered_posts
 
 
-def choose_posts_for_run(feed_posts, num_random_older: int = 2) -> List:
-    """
-    Kies:
-    - altijd de nieuwste post (index 0)
-    - plus num_random_older willekeurige oudere posts uit de rest
-
-    feed_posts moet in volgorde 'nieuwste eerst' staan.
-    """
+def choose_posts_for_run(feed_posts, num_random_older: int = 2):
     if not feed_posts:
         return []
 
     selected = []
-
-    # Nieuwste post (bovenaan in feed)
     newest = feed_posts[0]
     selected.append(newest)
 
-    # Oudere posts (alles na index 0)
     older = feed_posts[1:]
     if older:
         k = min(num_random_older, len(older))
@@ -169,52 +114,29 @@ def choose_posts_for_run(feed_posts, num_random_older: int = 2) -> List:
     return selected
 
 
-def order_posts_old_to_new(selected_posts, full_feed_posts) -> List:
-    """
-    Zorg dat we reposten van oud -> nieuw,
-    zodat de nieuwste repost-actie bovenaan de timeline komt.
-
-    full_feed_posts: lijst van feed items in volgorde 'nieuwste eerst'.
-    Index 0 = nieuwste, hoogste index = oudste.
-    We sorteren selected_posts op hun index, van hoog naar laag
-    (oudste eerst, nieuwste laatst).
-    """
-    index_map = {}
-    for i, fp in enumerate(full_feed_posts):
-        index_map[id(fp)] = i
-
-    indexed = []
-    for fp in selected_posts:
-        idx = index_map.get(id(fp), 9999)
-        indexed.append((idx, fp))
-
-    # Oudste eerst (hoogste index), nieuwste (laagste index) als laatste
-    indexed.sort(reverse=True, key=lambda x: x[0])
-
-    ordered = [fp for _, fp in indexed]
-    return ordered
-
-
 def unrepost_if_needed_and_repost(client: Client, feed_post) -> None:
-    """
-    - Check of deze post al is gerepost door de huidige account (viewer.repost)
-    - Zo ja: delete_repost(repost_uri)
-    - Daarna: repost(uri, cid)
-    """
-    post_view = feed_post.post  # AppBskyFeedDefs.PostView
+    post_view = feed_post.post
 
     uri = post_view.uri
     cid = post_view.cid
-    viewer = getattr(post_view, "viewer", None)
+    viewer = post_view.viewer
     repost_uri = getattr(viewer, "repost", None) if viewer else None
 
     if repost_uri:
-        logging.info("  Post %s is al gerepost. Oude repost wordt verwijderd: %s", uri, repost_uri)
+        logging.info(
+            "  Post %s is al gerepost. Oude repost wordt verwijderd: %s",
+            uri,
+            repost_uri,
+        )
         try:
             client.delete_repost(repost_uri)
             logging.info("  Oude repost verwijderd.")
         except Exception as e:
-            logging.warning("  Kon oude repost niet verwijderen (%s): %s", repost_uri, e)
+            logging.warning(
+                "  Kon oude repost niet verwijderen (%s): %s",
+                repost_uri,
+                e,
+            )
 
     logging.info("  Nieuwe repost van %s...", uri)
     try:
@@ -225,14 +147,6 @@ def unrepost_if_needed_and_repost(client: Client, feed_post) -> None:
 
 
 def process_account(label: str, target_handle: str) -> None:
-    """
-    Verwerk één bot-account:
-    - login
-    - posts ophalen
-    - filteren op: eigen + media + geen repost
-    - nieuwste + 2 random oudere kiezen
-    - in volgorde oud -> nieuw (nieuwste als laatste) unrepost + repost
-    """
     logging.info("=== Account %s starten ===", label)
     client = get_client_for_account(label)
     if not client:
@@ -240,7 +154,7 @@ def process_account(label: str, target_handle: str) -> None:
         return
 
     try:
-        feed_posts_raw = fetch_recent_posts(client, target_handle)
+        feed_posts = fetch_recent_posts(client, target_handle)
     except Exception as e:
         logging.error(
             "Kon feed voor %s niet ophalen bij account %s: %s",
@@ -250,48 +164,33 @@ def process_account(label: str, target_handle: str) -> None:
         )
         return
 
-    feed_posts = filter_valid_posts(feed_posts_raw, target_handle)
-
     if not feed_posts:
         logging.info(
-            "Geen geldige posts (eigen + media) gevonden voor %s, account %s slaat run over.",
+            "Geen geschikte posts gevonden voor %s, account %s slaat run over.",
             target_handle,
             label,
         )
         return
 
-    selected = choose_posts_for_run(feed_posts, num_random_older=2)
-    if not selected:
-        logging.info(
-            "Na selectie geen posts om te repost-en voor %s (account %s).",
-            target_handle,
-            label,
-        )
-        return
-
-    # Cruciaal: eerst de oudste, dan de nieuwste (laatste) repost,
-    # zodat de nieuwste repost bovenaan komt te staan.
-    to_repost_ordered = order_posts_old_to_new(selected, feed_posts)
+    to_repost = choose_posts_for_run(feed_posts, num_random_older=2)
 
     logging.info(
-        "Account %s gaat %d posts (nieuwste + random oudere) (opnieuw) repost-en "
-        "in volgorde: oud -> nieuw.",
+        "Account %s gaat %d posts (nieuwste + random oudere) (opnieuw) repost-en.",
         label,
-        len(to_repost_ordered),
+        len(to_repost),
     )
 
-    for feed_post in to_repost_ordered:
+    for feed_post in to_repost[::-1]:
         unrepost_if_needed_and_repost(client, feed_post)
 
 
 def main():
-    target_handle = get_target_handle()
-    logging.info("Target handle: %s", target_handle)
+    logging.info("Target handle: %s", TARGET_HANDLE)
 
     for label in ACCOUNT_KEYS:
-        process_account(label, target_handle)
+        process_account(label, TARGET_HANDLE)
 
-    logging.info("Multi-reposter run voltooid.")
+    logging.info("Multi-reposter run voltooid voor %s.", TARGET_HANDLE)
 
 
 if __name__ == "__main__":
