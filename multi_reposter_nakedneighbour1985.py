@@ -5,7 +5,7 @@ import logging
 from atproto import Client
 
 # ===== instellingen =====
-TARGET_HANDLE = "nakedneighbour1985.bsky.social""
+TARGET_HANDLE = "nakedneighbour1985.bsky.social"
 
 ACCOUNT_KEYS = [
     "BEAUTYFAN",
