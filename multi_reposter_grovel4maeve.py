@@ -55,61 +55,11 @@ def get_client_for_account(label: str) -> Optional[Client]:
     return client
 
 
-def post_has_media(post_view) -> bool:
+def fetch_recent_posts(client: Client, actor_handle: str, limit: int = 50):
     """
-    True als de post foto of video bevat.
-    We kijken naar embed op record en eventueel nested media.
-    """
-    record = getattr(post_view, "record", None)
-    embed = getattr(record, "embed", None) if record else None
-
-    # fallback: sommige versies zetten embed op post_view zelf
-    if embed is None:
-        embed = getattr(post_view, "embed", None)
-
-    if not embed:
-        return False
-
-    def _is_media_embed(e) -> bool:
-        if e is None:
-            return False
-        etype = (
-            getattr(e, "$type", "")
-            or getattr(e, "type", "")
-            or getattr(getattr(e, "_type", None), "__str__", lambda: "")()
-        )
-
-        # directe media-embeds
-        if "app.bsky.embed.images" in str(etype):
-            return True
-        if "app.bsky.embed.video" in str(etype):
-            return True
-
-        # vaak hebben images een 'images'-lijst
-        if getattr(e, "images", None):
-            return True
-
-        return False
-
-    # directe embed checken
-    if _is_media_embed(embed):
-        return True
-
-    # recordWithMedia: media hangt onder embed.media
-    media = getattr(embed, "media", None)
-    if _is_media_embed(media):
-        return True
-
-    # als we hier zijn: geen foto/video gevonden
-    return False
-
-
-def fetch_recent_media_posts(client: Client, actor_handle: str, limit: int = 50):
-    """
-    Haal recente posts van de target op, en filter:
-    - alleen eigen posts (geen reposts van anderen)
-    - alleen posts met media (foto/video)
-    We gebruiken 'posts_no_replies' zodat je geen replies pakt.
+    Haal recente posts van de target op.
+    We gebruiken 'posts_no_replies' zodat je alleen eigen posts pakt, geen replies.
+    LET OP: hier kunnen nog steeds reposts tussen zitten, die filteren we later eruit.
     """
     logging.info("Posts ophalen van %s (limit=%d)...", actor_handle, limit)
     feed = client.get_author_feed(
@@ -117,37 +67,90 @@ def fetch_recent_media_posts(client: Client, actor_handle: str, limit: int = 50)
         limit=limit,
         filter="posts_no_replies",
     )
+    # feed.feed is een lijst van FeedViewPost
+    return list(feed.feed or [])
 
-    raw_feed = list(feed.feed or [])
+
+# ---------- FILTERS: alleen eigen posts mét media (foto / video) ----------
+
+def has_image_or_video_embed(post_view) -> bool:
+    """
+    Check of de post een image- of video-embed heeft.
+    We kijken naar post_view.embed en desnoods naar record.embed.
+    We accepteren alleen embeds die duidelijk images / video zijn
+    (geen pure tekst, geen link-only).
+    """
+    record = getattr(post_view, "record", None)
+    embed = getattr(post_view, "embed", None)
+
+    if not embed and record is not None:
+        embed = getattr(record, "embed", None)
+
+    if not embed:
+        return False
+
+    # Unwrap recordWithMedia (embed.recordWithMedia.media)
+    embed_type = getattr(embed, "$type", "") or ""
+    if "recordWithMedia" in embed_type:
+        media = getattr(embed, "media", None)
+        if media:
+            embed = media
+            embed_type = getattr(embed, "$type", "") or ""
+
+    # Alleen image / video embeds
+    media_keywords = ("embed.images", "embed.video")
+    return any(k in embed_type for k in media_keywords)
+
+
+def is_original_post(feed_post) -> bool:
+    """
+    Sluit reposts van andere accounts uit.
+    - Geen feed_post.reason (die duidt vaak op een repost-reden).
+    - Record-type moet een 'echte' app.bsky.feed.post zijn, geen feed.repost.
+    """
+    if getattr(feed_post, "reason", None) is not None:
+        # Dit is waarschijnlijk een 'repost item' in de feed.
+        return False
+
+    post_view = feed_post.post
+    record = getattr(post_view, "record", None)
+    record_type = getattr(record, "$type", "") or ""
+
+    # Echte posts zijn app.bsky.feed.post
+    if "app.bsky.feed.post" not in record_type:
+        return False
+
+    return True
+
+
+def filter_original_with_media(feed_posts) -> List:
+    """
+    Filter feed_posts:
+    - Alleen echte eigen posts (geen repost items).
+    - Alleen posts met foto of video.
+    """
     filtered = []
-
-    for feed_post in raw_feed:
-        # feed_post is AppBskyFeedDefs.FeedViewPost
-
-        # 1) Geen reposts van anderen: reason moet None zijn
-        if getattr(feed_post, "reason", None) is not None:
-            # Dit is een repost die het account heeft gedaan → overslaan
+    for fp in feed_posts:
+        post_view = fp.post
+        if not is_original_post(fp):
             continue
-
-        post_view = feed_post.post
-
-        # 2) Alleen posts met media (foto/video)
-        if not post_has_media(post_view):
+        if not has_image_or_video_embed(post_view):
             continue
-
-        filtered.append(feed_post)
+        filtered.append(fp)
 
     logging.info(
-        "Gefilterde posts voor %s: %d van de %d (eigen + met media).",
-        actor_handle,
+        "Gefilterd: %d van %d posts over (alleen eigen posts met media).",
         len(filtered),
-        len(raw_feed),
+        len(feed_posts),
     )
     return filtered
 
 
+# ---------- SELECTIE & REPOST LOGICA ----------
+
 def choose_posts_for_run(feed_posts, num_random_older: int = 2):
     """
+    feed_posts moet al gefilterd zijn (alleen eigen posts met media).
     Kies:
     - altijd de nieuwste post (index 0)
     - plus num_random_older willekeurige oudere posts uit de rest
@@ -181,7 +184,7 @@ def unrepost_if_needed_and_repost(client: Client, feed_post) -> None:
 
     uri = post_view.uri
     cid = post_view.cid
-    viewer = post_view.viewer  # ViewerState of None
+    viewer = getattr(post_view, "viewer", None)
     repost_uri = getattr(viewer, "repost", None) if viewer else None
 
     if repost_uri:
@@ -204,8 +207,10 @@ def process_account(label: str, target_handle: str) -> None:
     """
     Verwerk één bot-account:
     - login
-    - eigen media-posts ophalen (geen reposts, geen tekst-only)
+    - posts ophalen
+    - filter: alleen eigen posts met media (foto/video)
     - nieuwste + 2 random oudere kiezen
+    - sorteren van oud -> nieuw
     - per gekozen post: unrepost (als nodig) + opnieuw repost
     """
     logging.info("=== Account %s starten ===", label)
@@ -215,7 +220,7 @@ def process_account(label: str, target_handle: str) -> None:
         return
 
     try:
-        feed_posts = fetch_recent_media_posts(client, target_handle)
+        feed_posts = fetch_recent_posts(client, target_handle)
     except Exception as e:
         logging.error(
             "Kon feed voor %s niet ophalen bij account %s: %s",
@@ -226,22 +231,37 @@ def process_account(label: str, target_handle: str) -> None:
         return
 
     if not feed_posts:
+        logging.info("Geen posts gevonden voor %s, account %s slaat run over.", target_handle, label)
+        return
+
+    # Eerst filteren op eigen posts + media
+    filtered_posts = filter_original_with_media(feed_posts)
+    if not filtered_posts:
         logging.info(
-            "Geen geschikte media-posts gevonden voor %s, account %s slaat run over.",
+            "Geen eigen posts met media gevonden voor %s, account %s slaat run over.",
             target_handle,
             label,
         )
         return
 
-    to_repost = choose_posts_for_run(feed_posts, num_random_older=2)
+    # Selecteer nieuwste + 2 random oudere
+    to_repost = choose_posts_for_run(filtered_posts, num_random_older=2)
+
+    # Sorteer van oud -> nieuw zodat de nieuwste als laatste wordt gerepost
+    # indexed_at is een ISO-datumstring, sorteren oplopend geeft oud -> nieuw
+    def get_indexed_at(fp):
+        post_view = fp.post
+        return getattr(post_view, "indexed_at", "") or ""
+
+    to_repost_sorted = sorted(to_repost, key=get_indexed_at)
 
     logging.info(
-        "Account %s gaat %d posts (nieuwste + random) (opnieuw) repost-en.",
+        "Account %s gaat %d posts (nieuwste + random oudere) (opnieuw) repost-en (van oud naar nieuw).",
         label,
-        len(to_repost),
+        len(to_repost_sorted),
     )
 
-    for feed_post in to_repost:
+    for feed_post in to_repost_sorted:
         unrepost_if_needed_and_repost(client, feed_post)
 
 
