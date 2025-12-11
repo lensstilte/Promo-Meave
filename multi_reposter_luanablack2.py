@@ -7,7 +7,7 @@ from atproto import Client
 
 # ==== CONFIG PER SCRIPT ====
 # Deze pas je per bestand aan (zie stap 2)
-TARGET_HANDLE = "veronagymnast.bsky.social"
+TARGET_HANDLE = "mrclydedu13.bsky.social"
 
 # Accounts / secrets keys (suffix na BSKY_USERNAME_ / BSKY_PASSWORD_)
 ACCOUNT_KEYS: List[str] = [
