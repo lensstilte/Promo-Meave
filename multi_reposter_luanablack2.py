@@ -6,7 +6,6 @@ from typing import Optional, List
 from atproto import Client
 
 # ==== CONFIG PER SCRIPT ====
-# Deze pas je per bestand aan (zie stap 2)
 TARGET_HANDLE = "mrclydedu13.bsky.social"
 
 # Accounts / secrets keys (suffix na BSKY_USERNAME_ / BSKY_PASSWORD_)
@@ -18,7 +17,6 @@ ACCOUNT_KEYS: List[str] = [
     "NSFWBLEUSKY",
 ]
 
-# Basis logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -26,10 +24,6 @@ logging.basicConfig(
 
 
 def get_client_for_account(label: str) -> Optional[Client]:
-    """
-    Haal username/password uit env en log in.
-    Als er geen secrets zijn ingevuld voor dit account: skip.
-    """
     username = os.getenv(f"BSKY_USERNAME_{label}")
     password = os.getenv(f"BSKY_PASSWORD_{label}")
 
@@ -53,41 +47,40 @@ def get_client_for_account(label: str) -> Optional[Client]:
 
 def has_media(post_view) -> bool:
     """
-    True als de post media heeft (images / media). Geen media = text-only = skip.
-    We kijken generiek naar embed, zonder specifieke modeltypes te gebruiken.
+    True als de post media heeft (images / video / record-with-media).
+    Text-only posts worden geskipt.
     """
     embed = getattr(post_view, "embed", None)
     if embed is None:
         return False
 
-    # Meest voorkomende gevallen: images of record-with-media
+    # Images (app.bsky.embed.images)
     if getattr(embed, "images", None):
         return True
 
-    if getattr(embed, "media", None):
-        # embedRecordWithMedia: media kan zelf weer images/video bevatten
-        media = embed.media
+    # Video (app.bsky.embed.video) - vaak velden als playlist/blob/video aanwezig
+    if getattr(embed, "video", None) or getattr(embed, "playlist", None):
+        return True
+
+    # Record-with-media (app.bsky.embed.recordWithMedia)
+    media = getattr(embed, "media", None)
+    if media is not None:
         if getattr(media, "images", None):
             return True
+        if getattr(media, "video", None) or getattr(media, "playlist", None):
+            return True
 
-    # Als er andere media-types bijkomen kun je hier nog extra checks toevoegen
     return False
 
 
 def is_own_original_post(feed_post, actor_handle: str) -> bool:
-    """
-    - Alleen echte eigen posts van de actor
-    - Geen reposts (reasonRepost)
-    """
     post_view = feed_post.post
     author = getattr(post_view, "author", None)
     handle = getattr(author, "handle", None)
 
-    # Veiligheid: check dat de auteur echt de target is
     if handle and handle != actor_handle:
         return False
 
-    # Reposts hebben een 'reason' met type ...#reasonRepost
     reason = getattr(feed_post, "reason", None)
     reason_type = getattr(reason, "$type", "") if reason else ""
     if "reasonRepost" in reason_type:
@@ -97,11 +90,6 @@ def is_own_original_post(feed_post, actor_handle: str) -> bool:
 
 
 def fetch_recent_posts(client: Client, actor_handle: str, limit: int = 50):
-    """
-    Haal recente posts van de target op.
-    - posts_no_replies: geen replies
-    - filter op: eigen originele posts + met media
-    """
     logging.info("Posts ophalen van %s (limit=%d)...", actor_handle, limit)
     feed = client.get_author_feed(
         actor=actor_handle,
@@ -115,10 +103,8 @@ def fetch_recent_posts(client: Client, actor_handle: str, limit: int = 50):
     for fp in feed_posts:
         post_view = fp.post
         if not is_own_original_post(fp, actor_handle):
-            # eigen repost of andere onzin -> skip
             continue
         if not has_media(post_view):
-            # text-only -> skip
             continue
         filtered.append(fp)
 
@@ -131,53 +117,33 @@ def fetch_recent_posts(client: Client, actor_handle: str, limit: int = 50):
 
 
 def choose_posts_for_run(feed_posts, num_random_older: int = 2):
-    """
-    Kies:
-    - altijd de nieuwste post
-    - plus num_random_older willekeurige oudere posts
-    """
     if not feed_posts:
         return []
 
     selected = []
-
-    # Nieuwste post (bovenaan in feed)
     newest = feed_posts[0]
     selected.append(newest)
 
-    # Oudere posts (alles na index 0)
     older = feed_posts[1:]
     if older:
         k = min(num_random_older, len(older))
-        random_older = random.sample(older, k=k)
-        selected.extend(random_older)
+        selected.extend(random.sample(older, k=k))
 
     return selected
 
 
 def get_post_timestamp(feed_post) -> str:
-    """
-    Sorteer van oud -> nieuw (zodat nieuwste als laatste wordt gerepost
-    en dus bovenaan je timeline komt te staan).
-    """
     post_view = feed_post.post
     record = getattr(post_view, "record", None)
 
-    # Probeer createdAt uit de record
     created_at = getattr(record, "created_at", None) or getattr(record, "createdAt", None)
     if created_at:
         return created_at
 
-    # Fallback: indexedAt
     return getattr(post_view, "indexed_at", None) or getattr(post_view, "indexedAt", "") or ""
 
 
 def unrepost_if_needed_and_repost_with_like(client: Client, feed_post) -> None:
-    """
-    - Check of deze post al is gerepost en/of geliked door de huidige account
-    - Zo ja: delete_repost / delete_like
-    - Daarna: repost + like
-    """
     post_view = feed_post.post
 
     uri = post_view.uri
@@ -220,14 +186,6 @@ def unrepost_if_needed_and_repost_with_like(client: Client, feed_post) -> None:
 
 
 def process_account(label: str, target_handle: str) -> None:
-    """
-    Verwerk één bot-account:
-    - login
-    - posts ophalen (eigen + media, geen reposts)
-    - nieuwste + 2 random oudere kiezen
-    - gesorteerd van oud -> nieuw:
-        unrepost/like (indien nodig) + opnieuw repost + like
-    """
     logging.info("=== Account %s starten (target=%s) ===", label, target_handle)
     client = get_client_for_account(label)
     if not client:
@@ -250,9 +208,6 @@ def process_account(label: str, target_handle: str) -> None:
         return
 
     to_repost = choose_posts_for_run(feed_posts, num_random_older=2)
-
-    # Belangrijk: van oud -> nieuw repost-en,
-    # zodat de nieuwste post als laatste komt en dus bovenaan je profiel.
     to_repost_sorted = sorted(to_repost, key=get_post_timestamp)
 
     logging.info(
