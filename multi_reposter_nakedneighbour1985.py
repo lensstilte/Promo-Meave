@@ -53,34 +53,30 @@ def get_client_for_account(label: str) -> Optional[Client]:
 
 def has_media(post_view) -> bool:
     """
-    True als de post media heeft (images / media). Geen media = text-only = skip.
+    True als de post media heeft (images / video / record-with-media).
+    Geen media = text-only = skip.
     We kijken generiek naar embed, zonder specifieke modeltypes te gebruiken.
     """
     embed = getattr(post_view, "embed", None)
     if embed is None:
         return False
 
-    # Meest voorkomende gevallen: images of record-with-media
+    # Direct images
     if getattr(embed, "images", None):
         return True
 
-    if getattr(embed, "media", None):
-        media = embed.media
-        if getattr(media, "images", None):
-            return True
-
-    return False
-    # Meest voorkomende gevallen: images of record-with-media
-    if getattr(embed, "images", None):
+    # Direct video (belangrijk)
+    if getattr(embed, "video", None):
         return True
 
-    if getattr(embed, "media", None):
-        # embedRecordWithMedia: media kan zelf weer images/video bevatten
-        media = embed.media
+    # record-with-media / media container
+    media = getattr(embed, "media", None)
+    if media:
         if getattr(media, "images", None):
             return True
+        if getattr(media, "video", None):
+            return True
 
-    # Als er andere media-types bijkomen kun je hier nog extra checks toevoegen
     return False
 
 
