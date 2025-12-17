@@ -65,6 +65,16 @@ def has_media(post_view) -> bool:
         return True
 
     if getattr(embed, "media", None):
+        media = embed.media
+        if getattr(media, "images", None):
+            return True
+
+    return False
+    # Meest voorkomende gevallen: images of record-with-media
+    if getattr(embed, "images", None):
+        return True
+
+    if getattr(embed, "media", None):
         # embedRecordWithMedia: media kan zelf weer images/video bevatten
         media = embed.media
         if getattr(media, "images", None):
