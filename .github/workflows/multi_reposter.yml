@@ -2,7 +2,7 @@ name: Multi Reposter (3 targets)
 
 on:
   schedule:
-    - cron: "30 */3 * * *"  # elke uur; pas aan naar wens
+    - cron: "37 */3 * * *"  # elke uur; pas aan naar wens
   workflow_dispatch:
 
 jobs:
