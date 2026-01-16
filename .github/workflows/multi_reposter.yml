@@ -1,12 +1,15 @@
+name: Multi Bluesky Reposter (3-hourly)
 
+on:
   workflow_dispatch:
+  schedule:
+    - cron: "42 */3 * * *"
 
 jobs:
   run-multi-reposter:
     runs-on: ubuntu-latest
 
     env:
-      # Secrets voor ALLE bot-accounts (reeds door jou aangemaakt)
       BSKY_USERNAME_BEAUTYFAN: ${{ secrets.BSKY_USERNAME_BEAUTYFAN }}
       BSKY_PASSWORD_BEAUTYFAN: ${{ secrets.BSKY_PASSWORD_BEAUTYFAN }}
 
@@ -36,14 +39,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install atproto
 
-      # 1) Eerst LUANABLACK2
       - name: Run multi_reposter_luanablack2
         run: python multi_reposter_luanablack2.py
 
-      # 2) Dan NAKEDNEIGHBOUR1985
       - name: Run multi_reposter_nakedneighbour1985
         run: python multi_reposter_nakedneighbour1985.py
 
-      # 3) ALS LAATSTE GROVEL4MAEVE (bovenaan in timeline)
       - name: Run multi_reposter_grovel4maeve
         run: python multi_reposter_grovel4maeve.py
