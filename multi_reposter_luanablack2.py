@@ -6,7 +6,7 @@ from typing import Optional, List
 from atproto import Client
 
 # ==== CONFIG PER SCRIPT ====
-TARGET_HANDLE = "temptingnikki.bsky.social"
+TARGET_HANDLE = "amberspanx.bsky.social"
 
 # Accounts / secrets keys (suffix na BSKY_USERNAME_ / BSKY_PASSWORD_)
 ACCOUNT_KEYS: List[str] = [
